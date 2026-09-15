@@ -43,14 +43,26 @@ equivalents, are in [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md).
 
 ## Run it on your own paper (recommended)
 
-`examples/run_pipeline_interactive.py` is the general entry point: it prompts you to
-**upload any research paper**, builds the Strategy Card interactively from what Stage 01
-mines out of it (abstract, economic-reasoning sentences, candidate parameters, asset
-classes mentioned), then walks Stage 03 as a conversation — for every asset class the
-paper touches on (equity, bond, mutual fund, commodity, cash rate, derivatives, ...) you
-either pick from data already in `data/raw/` or upload a new file, tagged by asset class.
-Only once that's settled does it run Stages 05–08 through the same fixed engine every
-Card in this repo uses.
+`examples/run_pipeline_interactive.py` is the general entry point. Two manual uploads
+drive it, with only a couple of short confirmations otherwise — not a long interview:
+
+1. **Upload any research paper (PDF).** Stage 01 parses it comprehensively (abstract,
+   every economic-reasoning sentence, candidate parameters), and Stage 02 **auto-
+   interprets** a Strategy Card directly from that parsing — no field-by-field questions.
+   Swap in a different paper each run and a different Card comes out automatically,
+   because every default traces back to what *that* paper's text actually said. You
+   approve or reject the whole auto-interpreted Card in one Gate A decision.
+2. **Upload your NIFTY-indices dataset (CSV)** — the same shape as the attached
+   `nifty_factor_indices.csv` (or leave it blank to use the bundled one). This run's scope
+   is fixed to **India public equities**, via whichever columns are in that file — no
+   per-asset-class questionnaire. The broader multi-asset-class discovery flow (bonds,
+   mutual funds, commodities, ...) still exists in
+   `backtester/data/sources.py:discover_datasets_interactively` for later use; it's just
+   not part of this simplified default path.
+
+Only once both are in hand does it run Stages 05–08 through the same fixed engine every
+Card in this repo uses, including Gate B (one investment decision: reject/fix/observe/
+promote).
 
 ```bash
 pip install -r requirements.txt

@@ -71,14 +71,19 @@ review* problem instead of a *needle in a haystack* problem.
   for the 42-feature forecast).
 - Ambiguities are resolved explicitly at Gate A, not silently defaulted.
 
-**Interactive builder.** `build_card_interactively()` turns this from "researcher fills in
-a blank YAML" into "researcher confirms or overrides a default the ingest report already
-found, one field at a time" — every prompt shows what Stage 01 mined (with its page
-number) before asking. It also auto-generates an `Ambiguity` for every candidate
-parameter Stage 01 could *not* find anywhere in the paper (so a gap is a structured,
-trackable item, not a silent zero) plus a standing `asset_class_coverage` ambiguity
-listing every asset class/segment the paper's text touched on, which Gate A and Stage 03
-both consume.
+**Two builders, same underlying report.** Both are driven entirely off Stage 01's
+`IngestReport` — the difference is how much a human is asked, not what the AI is allowed
+to author (the constraint is still the schema, either way):
+- `build_card_automatically()` — the default in `examples/run_pipeline_interactive.py`.
+  No per-field questions: every numeric field either uses the best candidate Stage 01
+  actually found in the paper (page-cited) or a fixed, documented default, and every such
+  choice is logged as an auto-resolved `Ambiguity` (what was found vs. what was defaulted
+  and why) rather than asked interactively. Gate A then reviews and approves/rejects the
+  *whole* auto-interpreted Card as one decision, with the full reasoning already visible,
+  instead of authoring it field by field.
+- `build_card_interactively()` — the same idea, but stops and asks at each field instead
+  of auto-selecting a default; useful when a Card needs closer human authorship than the
+  default automatic pass gives it. Still available, just not the default entry point.
 
 ---
 
@@ -123,17 +128,21 @@ for macro series.
 it might change the result (see `docs/DATA_SOURCES.md` for every proxy used in the worked
 example, each with this reasoning spelled out).
 
-**Interactive, any-asset-class discovery.** `discover_datasets_interactively()` is
-deliberately not equity-only: it walks through every asset class Stage 01 found the paper
-talking about (falling back to a fixed checklist — equity, bond, gold/commodity, mutual
-fund, cash rate, derivatives — so nothing is skipped just because the paper used unusual
-wording), and for each one asks whether to (a) use a column from a file already in
-`data/raw/`, (b) upload a new file (any asset class — a bond index, a mutual fund NAV
-series, an RBI rate series, ...), tagged so later stages know what they're holding, or
-(c) explicitly decline with a reason. This is what lets the pipeline handle a future paper
-whose signal needs bonds or mutual funds, not just the equity factor sleeves in the
-attached worked example, without changing a line of engine code — only the Stage 03
-conversation changes.
+**Two ways to run Stage 03, matching the two Card builders above.**
+- **Default (`examples/run_pipeline_interactive.py`):** a single, fixed-scope step for
+  this repo's current use case — India public equities via one manually uploaded
+  NIFTY-indices dataset. You upload a CSV (or accept the bundled example), it's registered
+  as `AVAILABLE` with no per-asset-class questions, and every column in it becomes the
+  tradable universe. Simple by design: no bond/mutual-fund/derivatives discovery clutter
+  when the run's scope doesn't need it.
+- **`discover_datasets_interactively()`** — the general, any-asset-class version, kept
+  available for when a paper's signal actually needs something this repo's current data
+  doesn't have: it walks through every asset class Stage 01 found the paper talking about
+  (falling back to a fixed checklist — equity, bond, gold/commodity, mutual fund, cash
+  rate, derivatives), and for each one asks whether to use a column already in
+  `data/raw/`, upload a new file (tagged by asset class), or explicitly decline with a
+  reason. Not the default path, but the mechanism is there the moment a bond- or
+  mutual-fund-driven paper needs it, without changing a line of engine code.
 
 ---
 

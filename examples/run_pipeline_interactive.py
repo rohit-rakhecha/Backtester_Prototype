@@ -1,21 +1,32 @@
-"""Interactive end-to-end run: upload ANY paper, choose/upload ANY data, run all 8 stages.
+"""Interactive end-to-end run: upload YOUR research paper + YOUR NIFTY-indices dataset.
+
+Two manual uploads drive this run, nothing else:
+  1. The research paper (PDF) -- Stage 01 parses it comprehensively (abstract, every
+     economic-reasoning sentence, candidate parameters, asset classes discussed), and
+     Stage 02 auto-interprets a Strategy Card directly from that parsing -- no field-by-
+     field interview. Swap in a different paper and a different Card comes out, because
+     every default traces back to what THAT paper's text actually said.
+  2. The NIFTY-indices dataset (CSV, e.g. the attached `nifty_factor_indices.csv`, or your
+     own file in the same shape) -- used AS-IS as the tradable universe for a simple,
+     long-only India public-equities backtest. No per-asset-class questionnaire: this
+     pipeline's scope for this run is fixed to Indian public equities via whatever columns
+     are in the file you upload.
 
 Unlike `examples/run_pipeline.py` (a fixed, non-interactive worked example pinned to the
-attached factor-rotation Card and the attached NSE CSV -- kept as a known-good regression
-demo), this script is the general entry point: it asks YOU to upload a research paper,
-builds the Strategy Card interactively from what Stage 01 mines out of it, asks YOU which
-India data sources to use or upload for whatever asset classes the paper touches on (not
-just equities -- bonds, mutual funds, commodities, rates, anything), and only then runs
-the same deterministic engine and validation stages every Card in this repo runs through.
+attached factor-rotation Card and the attached CSV -- kept as a known-good regression
+demo), this script is the general entry point for trying a NEW paper against the SAME
+kind of dataset. The broader multi-asset-class discovery flow (bonds, mutual funds,
+commodities, ...) still exists in `backtester/data/sources.py:discover_datasets_interactively`
+for later use; it's just not part of this simplified default path.
 
 Run with:  python examples/run_pipeline_interactive.py
-(or via the `%run` cell in examples/run_in_jupyter.ipynb, which is the intended way to
-run this in Colab -- prompts render as inline text boxes there, and PDF/CSV uploads use
-Colab's native file-upload widget.)
+(or via the `%run` cell in examples/run_in_jupyter.ipynb -- prompts render as inline text
+boxes in Colab, and PDF/CSV uploads use Colab's native file-upload widget.)
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,11 +34,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 
-from backtester.ingest.parser import comprehensive_ingest
-from backtester.ingest.strategy_card import build_card_interactively, save_card
+from backtester.ingest.parser import comprehensive_ingest, print_ingest_report
+from backtester.ingest.strategy_card import build_card_automatically, save_card
 from backtester.ingest.interactive_io import upload_file, prompt_text, prompt_choice, in_colab
-from backtester.data.pit_loader import merge_universe_components
-from backtester.data.sources import discover_datasets_interactively
+from backtester.data.pit_loader import PointInTimeDataset
+from backtester.data.sources import DataFeasibilityRegistry, DataSourceEntry, Feasibility
 from backtester.gates.audit import AuditLog, GateBDecision
 from backtester.engine import signals as sig
 from backtester.engine.costs import DEFAULT_INDIA_COST_MODEL
@@ -40,6 +51,7 @@ pd.set_option("display.width", 120)
 pd.set_option("display.max_columns", 20)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DATASET_PATH = os.path.join(REPO_ROOT, "data", "raw", "nifty_factor_indices.csv")
 
 
 def hr(title: str) -> None:
@@ -49,7 +61,8 @@ def hr(title: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# STAGE 01 -- Ingest: YOU upload the paper.
+# STAGE 01 -- Ingest: YOU upload the paper. This stage's output drives everything below --
+# comprehensive on purpose, since a different paper should produce a different Card.
 # ---------------------------------------------------------------------------
 hr("STAGE 01 -- Ingest (upload your research paper)")
 print(f"Running in Colab: {in_colab()}")
@@ -58,94 +71,117 @@ if not paper_path:
     raise SystemExit("No paper uploaded -- nothing to ingest. Re-run this cell and upload a PDF.")
 
 report = comprehensive_ingest(paper_path)
-# print_ingest_report(report) is called inside build_card_interactively below, so the
-# abstract/claims/candidate-parameters are shown right before the field they inform.
+print_ingest_report(report)
 
 # ---------------------------------------------------------------------------
-# STAGE 02 -- Strategy Card, built interactively FROM what Stage 01 found.
+# STAGE 02 -- Strategy Card, AUTO-INTERPRETED from Stage 01's report. No questions here --
+# every field below traces to something Stage 01 found (or a documented default), logged
+# as an auto-resolved ambiguity rather than asked interactively.
 # ---------------------------------------------------------------------------
-hr("STAGE 02 -- Strategy Card (built interactively from the ingest report above)")
-card = build_card_interactively(report)
+hr("STAGE 02 -- Strategy Card (auto-interpreted from the Stage 01 ingest report above)")
+card = build_card_automatically(report)
+print(f"\nUniverse (fixed scope for this run): {card.universe}")
+print(f"Signal (auto-interpreted): {card.signal.description[:200]}")
+print("\nAuto-resolved fields (what was found in the paper vs. what was defaulted):")
+for a in card.ambiguities:
+    print(f"  [{a.field}] {a.resolution}")
+
 card_yaml_path = os.path.join(REPO_ROOT, "data", "lineage", f"{card.card_id}.yaml")
 os.makedirs(os.path.dirname(card_yaml_path), exist_ok=True)
 save_card(card, card_yaml_path)
-print(f"Card saved to {card_yaml_path}")
+print(f"\nCard saved to {card_yaml_path}")
 
 # ---------------------------------------------------------------------------
-# GATE A -- resolve every ambiguity, then approve/reject.
+# GATE A -- one human decision on the whole auto-interpreted Card, not a per-field
+# interview (the fields were already auto-resolved above, with reasoning attached).
 # ---------------------------------------------------------------------------
 hr("GATE A -- Human interpretation sign-off")
-if card.unresolved_ambiguities():
-    print(f"{len(card.unresolved_ambiguities())} ambiguities need resolving before this Card can be approved:\n")
-    for a in card.unresolved_ambiguities():
-        print(f"[{a.field}] {a.description}")
-        a.resolution = prompt_text("  Resolution (how is this being handled?)")
-        a.resolved_by = prompt_text("  Resolved by (your name/role)", default="reviewer")
-
 reviewer = prompt_text("Gate A reviewer name", default="reviewer")
-decision = prompt_choice("Gate A decision", ["approved", "rejected"])
-note = prompt_text("Gate A note (why -- required)")
+decision = prompt_choice("Gate A decision -- approve this auto-interpreted Card?", ["approved", "rejected"])
+note = prompt_text(
+    "Gate A note (required -- e.g. confirm the auto-interpretation looks right, or say what's off)"
+)
 audit = AuditLog(path=os.path.join(REPO_ROOT, "data", "lineage", "audit_log.jsonl"))
 gate_a_entry = audit.gate_a(card, reviewer=reviewer, decision=decision, note=note)
 print(f"Gate A decision: {gate_a_entry.decision} by {gate_a_entry.reviewer}")
 if decision != "approved":
-    raise SystemExit("Card rejected at Gate A -- stopping here. Re-run and address the ambiguities to proceed.")
+    raise SystemExit("Card rejected at Gate A -- stopping here.")
 
 # ---------------------------------------------------------------------------
-# STAGE 03 -- Data feasibility & source discovery, interactive, any asset class.
+# STAGE 03 -- Data: YOU upload the NIFTY-indices dataset (or accept the bundled one).
+# Fixed scope for this run: India public equities, whatever columns are in the file.
+# No per-asset-class questionnaire.
 # ---------------------------------------------------------------------------
-hr("STAGE 03 -- Data feasibility & source discovery")
-registry, components = discover_datasets_interactively(
-    card, report.candidate_parameters["asset_classes_mentioned"], data_dir=os.path.join(REPO_ROOT, "data", "raw"),
+hr("STAGE 03 -- Data feasibility (India public equities, single uploaded dataset)")
+print("This run's scope is fixed to India public equities via one NIFTY-indices dataset --")
+print("no per-asset-class questions. Upload your own CSV, or accept the bundled example.\n")
+dataset_path = upload_file(
+    "Upload your NIFTY-indices CSV (leave blank / cancel to use the bundled data/raw/nifty_factor_indices.csv)",
+    save_dir=os.path.join(REPO_ROOT, "data", "raw"),
 )
-print("\n" + registry.report())
-feasibility = registry.check()
-print(f"\nOK to proceed to Stage 04: {feasibility['ok_to_proceed']}")
-if not feasibility["ok_to_proceed"]:
-    raise SystemExit(f"Stage 03 blocked: {feasibility}")
+if not dataset_path:
+    dataset_path = DEFAULT_DATASET_PATH
+    print(f"No file uploaded -- using the bundled dataset: {dataset_path}")
+if not os.path.exists(dataset_path):
+    raise SystemExit(f"Dataset not found at {dataset_path} -- upload a CSV and re-run.")
 
-tradable = [c for c in components if c.asset_class != "cash_rate"]
-cash_components = [c for c in components if c.asset_class == "cash_rate"]
-if len(tradable) < 2:
-    raise SystemExit(
-        f"Only {len(tradable)} tradable instrument(s) selected -- need at least 2 to build a "
-        "portfolio. Re-run Stage 03 and select/upload more."
-    )
+registry = DataFeasibilityRegistry()
+registry.register(DataSourceEntry(
+    requirement="india_equity_universe",
+    feasibility=Feasibility.available,
+    source=f"Manually uploaded dataset: {dataset_path}",
+))
+print(registry.report())
 
 # ---------------------------------------------------------------------------
-# STAGE 04 -- Point-in-time data: merge whatever was selected/uploaded, whichever files
-# they came from, into one date-indexed panel.
+# STAGE 04 -- Point-in-time data: load the uploaded dataset as-is, auto-detect the
+# broad-market benchmark column, and trim to the common evaluation window.
 # ---------------------------------------------------------------------------
-hr("STAGE 04 -- Point-in-time data (merged from your Stage 03 selections)")
-dataset = merge_universe_components(tradable)
-print(f"Merged {len(tradable)} tradable series from: {dataset.lineage.source_path}")
+hr("STAGE 04 -- Point-in-time data")
+dataset = PointInTimeDataset.from_csv(dataset_path)
+print(f"Source: {dataset.lineage.source_path}")
+print(f"Content SHA-256: {dataset.lineage.content_sha256}")
 print(f"Rows: {dataset.lineage.n_rows}  Range: {dataset.lineage.first_date} .. {dataset.lineage.last_date}")
-print("\nLaunch dates per series (first non-null value):")
+print("\nLaunch dates per series (first non-null close):")
 for col, d in dataset.launch_dates().items():
     print(f"  {col:30s} {d}")
 
-ASSET_COLS = list(dataset.df.columns)
-common_start = max(pd.Timestamp(d) for d in dataset.launch_dates().values())
-eval_df = dataset.df.loc[common_start:].dropna(subset=ASSET_COLS)
-print(f"\nCommon evaluation window (all {len(ASSET_COLS)} series live): "
+ALL_COLS = list(dataset.df.columns)
+# Auto-detect the broad-market benchmark. Prefer an EXACT "NIFTY 500"-style column name
+# (e.g. "NIFTY_500", "NIFTY500") over a merely-substring match, because a factor sleeve
+# like "NIFTY500_MOMENTUM_50" also contains "500" but is emphatically NOT the broad-market
+# benchmark -- picking it by loose substring match would silently mislabel a sleeve as the
+# benchmark. Falls back to the first column only if no exact-style match exists at all.
+# This is a documented heuristic, not a silent guess -- printed below either way.
+_exact_rx = re.compile(r"^nifty[_\s]?500$", re.IGNORECASE)
+exact_matches = [c for c in ALL_COLS if _exact_rx.match(c.strip())]
+if exact_matches:
+    BENCHMARK_COL = exact_matches[0]
+    detection_note = f"exact match for a 'NIFTY 500'-style column name ('{BENCHMARK_COL}')"
+else:
+    substring_matches = [c for c in ALL_COLS if "500" in c]
+    BENCHMARK_COL = substring_matches[0] if substring_matches else ALL_COLS[0]
+    detection_note = (
+        f"no exact 'NIFTY 500' column found -- fell back to a loose '500' substring match "
+        f"('{BENCHMARK_COL}'); VERIFY this is actually the broad-market index, not a factor sleeve"
+        if substring_matches else "no '500'-style column found at all -- used the first column"
+    )
+ASSET_COLS = [c for c in ALL_COLS if c != BENCHMARK_COL]
+print(f"\nAuto-detected benchmark column: '{BENCHMARK_COL}' ({detection_note})")
+print(f"Tradable universe ({len(ASSET_COLS)} instruments): {ASSET_COLS}")
+
+card.benchmark = f"{BENCHMARK_COL} (auto-detected from the uploaded dataset)"
+save_card(card, card_yaml_path)
+
+common_start = max(pd.Timestamp(d) for c, d in dataset.launch_dates().items() if c in ASSET_COLS)
+eval_df = dataset.df.loc[common_start:].dropna(subset=ASSET_COLS + [BENCHMARK_COL])
+print(f"\nCommon evaluation window (all series live): "
       f"{eval_df.index.min().date()} .. {eval_df.index.max().date()}  ({len(eval_df)} obs)")
 
 cash_annual_rate = 0.0
-if cash_components:
-    cash_dataset = merge_universe_components(cash_components)
-    cash_col = cash_components[0].label
-    cash_series = cash_dataset.df[cash_col].reindex(eval_df.index).ffill()
-    # Simplifying assumption, disclosed rather than silent: treat the selected cash-rate
-    # column as an ANNUALIZED PERCENTAGE YIELD (e.g. a T-Bill yield printed as "6.5"), and
-    # use its full-sample mean as a constant annual cash rate. A real deployment should
-    # instead feed a time-varying DAILY rate into the engine -- flagged here, not hidden.
-    cash_annual_rate = float(cash_series.mean()) / 100.0
-    print(f"\nCash-rate column '{cash_col}' selected -- using its mean ({cash_annual_rate:.2%} "
-          "annualized) as a CONSTANT rate for this run. This is a simplification: a real "
-          "deployment needs a time-varying daily rate, not a full-sample average.")
-else:
-    print("\nNo cash-rate data source selected in Stage 03 -- cash_annual_rate stays at the "
-          "0% placeholder (see the accepted gap logged in the Stage 03 report above).")
+print(f"\nCash rate: fixed at the {cash_annual_rate:.0%} placeholder for this simplified "
+      "equities-only flow (see docs/DATA_SOURCES.md -- an India risk-free series is not "
+      "part of this run's scope).")
 
 # ---------------------------------------------------------------------------
 # STAGE 05 -- Build + execute.
@@ -156,10 +192,9 @@ n = len(ASSET_COLS)
 equal_weight = np.ones(n) / n
 target_vol = card.risk.target_volatility_annual
 one_way_bps = DEFAULT_INDIA_COST_MODEL.one_way_cost_bps()
-print(f"Universe ({n} instruments): {ASSET_COLS}")
 print(f"India one-way cost assumption: {one_way_bps:.2f} bps "
-      f"(vs. paper's flat {card.cost.paper_assumed_bps} bps assumption)")
-print(f"Target annualized volatility (from Card): {target_vol:.1%}")
+      f"(vs. paper's {card.cost.paper_assumed_bps} bps assumption)")
+print(f"Target annualized volatility (auto-interpreted from Card): {target_vol:.1%}")
 
 markowitz_diagnostics: list[dict] = []
 strategies = {
@@ -181,6 +216,10 @@ for name, fn in strategies.items():
     )
     results[name] = simr.run(fn)
 
+bench_ret = eval_df[BENCHMARK_COL].pct_change().dropna()
+bench_value = (1 + bench_ret).cumprod()
+bench_value.name = BENCHMARK_COL
+
 print("\nPerformance summary (annualized, net of India costs):")
 summary_rows = []
 for name, res in results.items():
@@ -188,6 +227,10 @@ for name, res in results.items():
     m["annualized_turnover"] = 252.0 * res.turnover.mean()
     m["strategy"] = name
     summary_rows.append(m)
+m_bench = performance_metrics(bench_value, cash_annual_rate=cash_annual_rate)
+m_bench["annualized_turnover"] = 0.0
+m_bench["strategy"] = f"{BENCHMARK_COL} (passive benchmark)"
+summary_rows.append(m_bench)
 summary = pd.DataFrame(summary_rows).set_index("strategy")[
     ["return", "volatility", "sharpe", "max_drawdown", "mean_drawdown", "annualized_turnover"]
 ]
@@ -235,7 +278,7 @@ print(f"\nDeflated Sharpe Ratio (corrects for {dsr['n_trials']}-specification vo
       f"{dsr['deflated_sharpe_ratio']:.3f}  (trial Sharpe std: {dsr['trial_sharpe_std']:.3f})")
 
 hr("STAGE 06b -- Signal transparency: is the alpha actually predictive?")
-print(f"Strategy Card's signal claim (Stage 02): \"{card.signal.description}\"")
+print(f"Strategy Card's signal claim (Stage 02, auto-interpreted): \"{card.signal.description}\"")
 sig_diag = research_validation.signal_diagnostics(
     markowitz_diagnostics, returns, horizon_days=21, card_signal_description=card.signal.description,
 )
@@ -252,21 +295,19 @@ decomp = research_validation.decompose_vs_equal_weight(
 print(decomp["narrative"])
 
 # ---------------------------------------------------------------------------
-# STAGE 07 -- Portfolio validation.
+# STAGE 07 -- Portfolio validation (against the auto-detected benchmark).
 # ---------------------------------------------------------------------------
 hr("STAGE 07 -- Portfolio validation")
 strat_returns = markowitz_result.value.pct_change().dropna()
-benchmark_col = prompt_choice("Pick a column to use as the benchmark for factor-exposure checks", ASSET_COLS)
-factor_panel = eval_df[[benchmark_col]].pct_change()
+factor_panel = eval_df[[BENCHMARK_COL]].pct_change()
 exposure = portfolio_validation.factor_exposure(strat_returns, factor_panel, lag=1)
-print(f"\nFactor exposure to lagged '{benchmark_col}': {exposure}")
+print(f"Factor exposure to lagged '{BENCHMARK_COL}' (avoids look-ahead): {exposure}")
 
 tv_cvar = portfolio_validation.turnover_and_cvar_report(strat_returns, markowitz_result.turnover)
 print(f"\nTurnover & tail risk: {tv_cvar}")
 
-bench_ret = eval_df[benchmark_col].pct_change().dropna()
 incr = portfolio_validation.incremental_information_ratio(strat_returns, bench_ret, weight_in_book=0.20)
-print(f"\nIncremental IR of adding strategy at 20% of a '{benchmark_col}'-only book: {incr}")
+print(f"\nIncremental IR of adding strategy at 20% of a '{BENCHMARK_COL}'-only book: {incr}")
 
 # ---------------------------------------------------------------------------
 # GATE B -- Investment decision.
