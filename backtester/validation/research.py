@@ -60,6 +60,11 @@ def bootstrap_metrics(
     def ci(arr):
         arr = np.array(arr)
         arr = arr[~np.isnan(arr)]
+        if len(arr) == 0:
+            # Every replication produced NaN (e.g. a strategy that never traded and
+            # had zero realized volatility) -- surface this as an explicit gap rather
+            # than crashing with an opaque IndexError deep inside numpy.percentile.
+            return float("nan"), (float("nan"), float("nan"))
         return float(np.mean(arr)), (float(np.percentile(arr, 2.5)), float(np.percentile(arr, 97.5)))
 
     r_mean, r_ci = ci(boot_return)

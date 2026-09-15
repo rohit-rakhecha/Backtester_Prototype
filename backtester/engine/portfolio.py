@@ -64,16 +64,23 @@ class PortfolioSimulator:
         self.n = len(self.assets)
         self._daily_cash_rate = self.cash_annual_rate / 252.0
 
-    def _rebalance_dates(self) -> list:
+    def _rebalance_dates(self) -> pd.DatetimeIndex:
         idx = self.asset_returns.index
         grouped = pd.Series(idx, index=idx).groupby(
             pd.Grouper(freq=self.rebalance_frequency)
         ).last().dropna()
-        return list(grouped.values)
+        return pd.DatetimeIndex(grouped.to_numpy())
 
     def run(self, weight_fn: WeightFn, initial_weights: Optional[np.ndarray] = None) -> SimulationResult:
         idx = self.asset_returns.index
-        rebal_dates = set(self._rebalance_dates())
+        # `idx.isin(...)` is a vectorized, dtype-normalizing comparison -- unlike
+        # `date in set(...)`, it is robust to pandas/numpy datetime64 resolution
+        # mismatches (e.g. ns vs us) across environments/versions, which otherwise
+        # silently break Timestamp/np.datetime64 hash equality and make every
+        # rebalance check false (the strategy then never trades and sits in 100%
+        # cash for the whole backtest -- a real bug hit on a newer pandas/numpy
+        # build, see git history for this file).
+        is_rebal = idx.isin(self._rebalance_dates())
 
         n = self.n
         w = np.zeros(n) if initial_weights is None else initial_weights.copy()
@@ -104,7 +111,7 @@ class PortfolioSimulator:
 
             turnover = 0.0
             cost = 0.0
-            if date in rebal_dates:
+            if is_rebal[t]:
                 target = weight_fn(date, self.asset_returns.loc[:date], w)
                 target = np.clip(target, 0.0, None)
                 if target.sum() > 1.0 + 1e-9:
