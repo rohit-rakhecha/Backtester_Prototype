@@ -88,6 +88,8 @@ def markowitz(
     horizon_days: int = 21,
     one_way_cost_bps: float = 15.0,
     cash_annual_rate: float = 0.0,
+    asset_names: Optional[list[str]] = None,
+    diagnostics: Optional[list[dict]] = None,
 ):
     """Convex, long-only optimization with a hard volatility cap and an L1 trust region
     around a target relative mix -- direct generalization of the paper's eq. (3) from 3
@@ -97,6 +99,17 @@ def markowitz(
     in relative-weight space -- this last constraint is what keeps the optimizer from
     concentrating entirely into whichever sleeve had the best trailing momentum, i.e. it
     bounds how much active bet the optimizer is allowed to take away from the benchmark mix.
+
+    `diagnostics`, if a list is passed in, is appended to on every rebalance with a record
+    of {date, alpha, target_weights, deviation_from_target_relative}. This is what makes
+    Stage 06 transparent (docs/PIPELINE.md): rather than only ever seeing the *outcome*
+    (a Sharpe ratio), a reviewer can pull this log and directly check whether the alpha
+    the optimizer acted on actually predicted anything -- see
+    validation/research.py:signal_diagnostics, which consumes exactly this log to compute
+    the signal's realized information coefficient against forward returns. This is also
+    the mechanism for connecting Stage 06 back to Stage 02: the Card's `signal.description`
+    is a CLAIM about what should predict returns; this log is the evidence for or against
+    that claim actually holding in this dataset, not just a restatement of the paper's claim.
     """
     import cvxpy as cp
 
@@ -104,6 +117,7 @@ def markowitz(
     target_relative = target_relative / target_relative.sum()
     n = len(target_relative)
     daily_cash = cash_annual_rate / 252.0
+    names = asset_names or [f"asset_{i}" for i in range(n)]
 
     def _fn(date, returns_as_of, current_w):
         hist = returns_as_of.fillna(0.0)
@@ -135,13 +149,35 @@ def markowitz(
             try:
                 prob.solve(solver=cp.ECOS)
             except Exception:
-                return target_relative.copy() * min(1.0, target_vol_annual / max(trailing_volatility(hist, target_relative, cov_lookback_days), 1e-6))
+                fallback = target_relative.copy() * min(
+                    1.0, target_vol_annual / max(trailing_volatility(hist, target_relative, cov_lookback_days), 1e-6)
+                )
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "date": date, "alpha": dict(zip(names, alpha)), "target_weights": dict(zip(names, fallback)),
+                        "deviation_from_target_relative": float(np.abs(fallback - target_relative * fallback.sum()).sum()),
+                        "solver_status": "failed_fallback",
+                    })
+                return fallback
 
         if w.value is None:
+            if diagnostics is not None:
+                diagnostics.append({
+                    "date": date, "alpha": dict(zip(names, alpha)), "target_weights": dict(zip(names, target_relative)),
+                    "deviation_from_target_relative": 0.0, "solver_status": "no_solution_fallback",
+                })
             return target_relative.copy()
         out = np.clip(np.asarray(w.value).flatten(), 0.0, None)
         if out.sum() > 1.0:
             out = out / out.sum()
+        if diagnostics is not None:
+            diagnostics.append({
+                "date": date,
+                "alpha": dict(zip(names, alpha)),
+                "target_weights": dict(zip(names, out)),
+                "deviation_from_target_relative": float(np.abs(out - target_relative * out.sum()).sum()),
+                "solver_status": prob.status,
+            })
         return out
 
     return _fn

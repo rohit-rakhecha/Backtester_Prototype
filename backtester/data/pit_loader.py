@@ -95,3 +95,38 @@ class PointInTimeDataset:
         lineage_path = out_path + ".lineage.json"
         with open(lineage_path, "w") as f:
             json.dump(self.lineage.to_dict(), f, indent=2)
+
+
+def merge_universe_components(components: list, date_col: str = "date") -> "PointInTimeDataset":
+    """Merge Stage 03's interactively-selected `UniverseComponent`s -- each naming a
+    source CSV and a column, possibly across several different files (e.g. an equity
+    index from one upload, a bond index from another) -- into a single date-indexed
+    price panel, labeled by each component's `label`. Loads each source file once even
+    when multiple components share it.
+
+    Duck-types on `comp.source_path` / `comp.column` / `comp.label` rather than importing
+    `data.sources.UniverseComponent`, so this stays a one-way dependency (sources.py may
+    depend on pit_loader concepts later; pit_loader never needs to know about Stage 03's
+    interactive-discovery types).
+    """
+    cache: dict[str, pd.DataFrame] = {}
+    series: dict[str, pd.Series] = {}
+    source_files: list[str] = []
+    for comp in components:
+        if comp.source_path not in cache:
+            raw = pd.read_csv(comp.source_path, parse_dates=[date_col]).set_index(date_col)
+            cache[comp.source_path] = raw
+            source_files.append(comp.source_path)
+        series[comp.label] = cache[comp.source_path][comp.column]
+    merged = pd.DataFrame(series).sort_index()
+
+    lineage = Lineage(
+        source_path="; ".join(source_files),
+        content_sha256="; ".join(_hash_file(p) for p in source_files),
+        retrieved_at=datetime.now(timezone.utc).isoformat(),
+        n_rows=len(merged),
+        columns=list(merged.columns),
+        first_date=str(merged.index.min().date()) if len(merged) else "n/a",
+        last_date=str(merged.index.max().date()) if len(merged) else "n/a",
+    )
+    return PointInTimeDataset(merged, lineage)

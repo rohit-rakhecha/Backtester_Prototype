@@ -11,6 +11,8 @@ silently proceed past Stage 03 with an unresolved PROXY or UNAVAILABLE requireme
 """
 from __future__ import annotations
 
+import glob
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -141,3 +143,130 @@ def india_registry_for_factor_rotation_card() -> DataFeasibilityRegistry:
                           "into the feature panel for this worked example.",
     ))
     return reg
+
+
+# ---------------------------------------------------------------------------
+# Generic, interactive Stage 03 -- works for ANY paper and ANY asset class, not just
+# the hardcoded factor-rotation worked example above.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UniverseComponent:
+    """One column, from one file, tagged with what kind of instrument it is. This is
+    the atomic unit Stage 04/05 actually load -- deliberately asset-class agnostic
+    (equity, bond, mutual fund, commodity, rate, ...) because a Card built from a
+    different paper may need a completely different mix (per the board memo: "we might
+    shift to other asset classes eg bonds/mutual funds too")."""
+    label: str
+    asset_class: str
+    source_path: str
+    column: str
+
+
+def list_local_csv_datasets(data_dir: str = "data/raw") -> dict[str, list[str]]:
+    """Every CSV already on disk and its non-date columns -- what Stage 03 can offer the
+    user to pick from before asking them to upload anything new."""
+    import pandas as pd
+
+    out: dict[str, list[str]] = {}
+    for path in sorted(glob.glob(os.path.join(data_dir, "*.csv"))):
+        try:
+            cols = list(pd.read_csv(path, nrows=0).columns)
+        except Exception:
+            cols = []
+        out[path] = [c for c in cols if c.strip().lower() != "date"]
+    return out
+
+
+# The same broad vocabulary parser.py uses to scan the paper's own text -- kept as the
+# default asset-class checklist so Stage 03 always asks about the full range even when a
+# paper's wording happens to use different terms for the same thing.
+DEFAULT_ASSET_CLASSES = ["equity", "bond", "gold_commodity", "mutual_fund", "cash_rate", "derivatives"]
+
+
+def discover_datasets_interactively(
+    card,
+    asset_classes_mentioned: dict[str, int] | None = None,
+    data_dir: str = "data/raw",
+) -> tuple[DataFeasibilityRegistry, list[UniverseComponent]]:
+    """Stage 03, interactively, generalized to any asset class. For every asset class the
+    source paper touches on (from Stage 01's `asset_classes_mentioned`, falling back to
+    `DEFAULT_ASSET_CLASSES` so nothing is skipped just because the regex missed a keyword),
+    ask the user to:
+      (a) pick from columns already available in `data_dir` (e.g. the attached NSE factor
+          indices), and/or
+      (b) upload a new file for it -- explicitly supporting non-equity data (a bond index,
+          a mutual fund NAV series, a commodity price series, an RBI rate series, ...),
+          tagged by asset class so later stages know what they're holding, and/or
+      (c) explicitly decline with a reason, which is recorded as an accepted gap (never a
+          silent drop -- the "No silent proxy use" control from the board memo).
+    Returns a populated DataFeasibilityRegistry (for the Stage 03 report/gate) plus the
+    list of UniverseComponents Stage 04 will actually load.
+    """
+    from ..ingest.interactive_io import prompt_multiselect, prompt_yesno, prompt_text, upload_file
+
+    registry = DataFeasibilityRegistry()
+    components: list[UniverseComponent] = []
+
+    local = list_local_csv_datasets(data_dir)
+    all_local_choices = [(path, col) for path, cols in local.items() for col in cols]
+
+    asset_classes = list((asset_classes_mentioned or {}).keys()) or list(DEFAULT_ASSET_CLASSES)
+    for c in DEFAULT_ASSET_CLASSES:
+        if c not in asset_classes:
+            asset_classes.append(c)
+
+    print("\n" + "=" * 78)
+    print("STAGE 03 -- Data feasibility & source discovery (interactive)")
+    print("=" * 78)
+    print(f"Strategy Card universe (from Stage 02): {card.universe}")
+    print("For EACH asset class/segment below: pick existing local data, upload a new")
+    print("file (any asset class -- equity, bond, mutual fund, commodity, rate, ...), or")
+    print("explicitly decline with a reason. Nothing is silently skipped.\n")
+
+    for cls in asset_classes:
+        mention_note = f" (mentioned {asset_classes_mentioned[cls]}x in the paper)" if asset_classes_mentioned and cls in asset_classes_mentioned else ""
+        print(f"\n-- Asset class / segment: {cls}{mention_note} --")
+        options = [f"{col}  (in {os.path.basename(path)})" for path, col in all_local_choices]
+        picks = prompt_multiselect(f"Use existing local column(s) for '{cls}'?", options)
+        for label in picks:
+            idx = options.index(label)
+            path, col = all_local_choices[idx]
+            components.append(UniverseComponent(label=col, asset_class=cls, source_path=path, column=col))
+            registry.register(DataSourceEntry(
+                requirement=f"{cls}:{col}", feasibility=Feasibility.available,
+                source=f"local file {path}, column '{col}'",
+            ))
+
+        while prompt_yesno(f"Upload an additional file for '{cls}'?", default=False):
+            path = upload_file(f"Upload a CSV for '{cls}' (must have a 'date' column)", save_dir=data_dir)
+            if not path or not os.path.exists(path):
+                print("  No file received -- skipping upload.")
+                break
+            try:
+                import pandas as pd
+                cols = [c for c in pd.read_csv(path, nrows=0).columns if c.strip().lower() != "date"]
+            except Exception as e:
+                print(f"  Could not read {path}: {e}")
+                cols = []
+            for col in cols:
+                if prompt_yesno(f"  Use column '{col}' from {os.path.basename(path)}?", default=True):
+                    components.append(UniverseComponent(label=col, asset_class=cls, source_path=path, column=col))
+                    registry.register(DataSourceEntry(
+                        requirement=f"{cls}:{col}", feasibility=Feasibility.available,
+                        source=f"uploaded file {path}, column '{col}'",
+                    ))
+
+        if not any(c.asset_class == cls for c in components):
+            reason = prompt_text(
+                f"No data sourced for '{cls}' -- reason (required, e.g. 'out of scope for v1', "
+                "'not available in India', 'will proxy later')"
+            )
+            req_name = f"{cls}:unsourced"
+            registry.register(DataSourceEntry(
+                requirement=req_name, feasibility=Feasibility.unavailable,
+                source="not sourced in this session",
+            ))
+            registry.accept_gap(req_name, note=reason, accepted_by="interactive-session")
+
+    return registry, components

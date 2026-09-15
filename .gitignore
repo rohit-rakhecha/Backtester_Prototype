@@ -3,7 +3,9 @@ __pycache__/
 .pytest_cache/
 data/lineage/*.jsonl
 data/lineage/*.db
+data/lineage/*.yaml
 data/snapshots/*
 !data/snapshots/.gitkeep
+data/uploads/
 *.egg-info/
 .venv/

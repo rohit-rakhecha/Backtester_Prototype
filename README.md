@@ -41,7 +41,26 @@ Required Indian data sources, derived by actually parsing the attached research 
 mapping its US data (SPY/AGG/GLD/DFF/CPILFESL/Fama-French/FRED yields) onto India-investable
 equivalents, are in [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md).
 
-## Worked example included
+## Run it on your own paper (recommended)
+
+`examples/run_pipeline_interactive.py` is the general entry point: it prompts you to
+**upload any research paper**, builds the Strategy Card interactively from what Stage 01
+mines out of it (abstract, economic-reasoning sentences, candidate parameters, asset
+classes mentioned), then walks Stage 03 as a conversation — for every asset class the
+paper touches on (equity, bond, mutual fund, commodity, cash rate, derivatives, ...) you
+either pick from data already in `data/raw/` or upload a new file, tagged by asset class.
+Only once that's settled does it run Stages 05–08 through the same fixed engine every
+Card in this repo uses.
+
+```bash
+pip install -r requirements.txt
+python examples/run_pipeline_interactive.py
+```
+
+In Colab, run this via the `%run` cell in `examples/run_in_jupyter.ipynb` (section 3A) —
+prompts render as inline text boxes, and uploads use Colab's native file-upload widget.
+
+## Worked example included (fixed, non-interactive)
 
 `data/raw/nifty_factor_indices.csv` is the attached NSE factor-index price history (daily
 closes, 2003–2026, for NIFTY Alpha 50, NIFTY500 Momentum 50, NIFTY500 Multifactor MQVLV 50,
@@ -51,7 +70,11 @@ Card that replicates the *methodology* of the attached paper — hard volatility
 simple causal return forecast + convex optimization, long-only, monthly rebalance — but
 re-targets it at an **India factor-sleeve rotation** (long-only, no leverage, no derivatives)
 instead of stock/bond/gold. `examples/run_pipeline.py` runs all 8 stages end to end against
-this real data and prints the promotion-ladder verdict.
+this real data, with no prompts, and prints the promotion-ladder verdict. It also includes
+Stage 06's signal-transparency diagnostics (Information Coefficient + a vol-cap-vs-alpha-tilt
+decomposition), which on this worked example show *why* the optimizer roughly matches, but
+doesn't clearly beat, a naive equal-weight benchmark — see `docs/PIPELINE.md` Stage 06.
+Kept as a fixed regression check independent of the interactive flow above.
 
 ```bash
 pip install -r requirements.txt

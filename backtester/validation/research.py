@@ -169,6 +169,156 @@ def deflated_sharpe_ratio(
     }
 
 
+def signal_diagnostics(
+    diagnostics_log: list[dict],
+    asset_returns: pd.DataFrame,
+    horizon_days: int = 21,
+    card_signal_description: str | None = None,
+) -> dict:
+    """Evaluate whether the alpha the Markowitz optimizer actually acted on
+    (engine/signals.py `markowitz(..., diagnostics=log)`) predicted forward returns, on
+    this exact dataset. This is Stage 06's direct, mechanism-level answer to "why did
+    equal-weight outperform the optimizer": if the Information Coefficient computed here
+    is near zero, the tilt away from equal-weight was -- empirically, in this sample --
+    close to noise, so an optimizer trusting it does no better (and net of turnover cost,
+    often worse) than doing nothing. This is also the explicit link back to Stage 02: the
+    Card's `signal.description` is a CLAIM about what should predict returns; this is the
+    evidence for or against that claim holding in the data actually used, not a restatement
+    of what the source paper claimed for ITS market and period.
+
+    For every rebalance in the log: cross-sectional Spearman rank correlation between the
+    alpha vector used AT that rebalance and each asset's realized forward `horizon_days`
+    return (looked up strictly AFTER the rebalance date -- this is a pure post-hoc
+    diagnostic, never fed back into the strategy itself). This is the standard quant-
+    research "Information Coefficient" (IC): IC > 0 means the signal ranked winners above
+    losers more often than chance; IC ~ 0 means it didn't; IC < 0 means it was
+    anti-predictive.
+    """
+    if not diagnostics_log:
+        return {
+            "mean_ic": float("nan"), "hit_rate": float("nan"), "n_rebalances_evaluated": 0,
+            "interpretation": "No diagnostics recorded -- pass a `diagnostics=[]` list into "
+                               "engine.signals.markowitz() to enable this check.",
+            "card_signal_claim": card_signal_description,
+        }
+
+    dates = asset_returns.index
+    records = []
+    for entry in diagnostics_log:
+        d = pd.Timestamp(entry["date"])
+        pos = dates.searchsorted(d)
+        if pos + 1 + horizon_days > len(dates):
+            continue
+        fwd_ret = (1 + asset_returns.iloc[pos + 1: pos + 1 + horizon_days]).prod() - 1
+        alpha_series = pd.Series(entry["alpha"])
+        common = alpha_series.index.intersection(fwd_ret.index)
+        if len(common) < 3:
+            continue
+        ic = alpha_series.loc[common].corr(fwd_ret.loc[common], method="spearman")
+        if ic == ic:  # not NaN
+            records.append({"date": d, "ic": ic})
+
+    if not records:
+        return {
+            "mean_ic": float("nan"), "hit_rate": float("nan"), "n_rebalances_evaluated": 0,
+            "interpretation": "Diagnostics were recorded but none had enough forward-return "
+                               "history to evaluate (e.g. every rebalance was too close to "
+                               "the end of the sample).",
+            "card_signal_claim": card_signal_description,
+        }
+
+    ic_df = pd.DataFrame(records)
+    mean_ic = float(ic_df["ic"].mean())
+    hit_rate = float((ic_df["ic"] > 0).mean())
+
+    if mean_ic > 0.05:
+        interp = (
+            "Positive mean IC: the alpha signal DID rank future winners above losers more "
+            "often than chance in this dataset -- an optimizer tilting toward it has a real "
+            "(if modest) edge to exploit, net of whether trading costs eat it."
+        )
+    elif mean_ic > -0.05:
+        interp = (
+            "Mean IC is close to zero: the alpha signal's cross-sectional ranking of assets "
+            "was essentially UNCORRELATED with what actually outperformed over the next "
+            "period. This is direct evidence for why deviating from equal-weight did not "
+            "clearly help here -- the optimizer was tilting toward a signal that, "
+            "empirically, was not predictive in this sample. It does not mean the Strategy "
+            "Card's signal claim (Stage 02) is wrong in general -- only that this specific "
+            "dataset/period did not bear it out; a different universe, period, or horizon "
+            "could show a different IC."
+        )
+    else:
+        interp = (
+            "Negative mean IC: the alpha signal ranked future LOSERS above winners more "
+            "often than chance -- tilting toward it was actively counterproductive here."
+        )
+
+    return {
+        "mean_ic": mean_ic,
+        "hit_rate": hit_rate,
+        "n_rebalances_evaluated": len(ic_df),
+        "interpretation": interp,
+        "card_signal_claim": card_signal_description,
+    }
+
+
+def decompose_vs_equal_weight(
+    equal_weight_result, vol_controlled_result, markowitz_result, cash_annual_rate: float = 0.0
+) -> dict:
+    """Splits the Markowitz strategy's Sharpe difference from static equal-weight into two
+    effects, valid because all three legs share the same equal-weight target relative mix
+    (see examples -- vol_controlled() and markowitz() are both called with
+    target_relative=equal_weight):
+      - vol-cap effect    : Sharpe(vol-controlled equal-weight) - Sharpe(static equal-weight)
+      - alpha-tilt effect : Sharpe(Markowitz) - Sharpe(vol-controlled equal-weight)
+    This answers "why did equal-weight outperform the optimizer" at the MECHANISM level
+    (which of the two things the optimizer does -- cap risk, or tilt toward alpha -- is
+    responsible) rather than only at the outcome level (one Sharpe number).
+    """
+    from ..engine.portfolio import performance_metrics
+
+    m_eq = performance_metrics(equal_weight_result.value, cash_annual_rate)
+    m_vc = performance_metrics(vol_controlled_result.value, cash_annual_rate)
+    m_mw = performance_metrics(markowitz_result.value, cash_annual_rate)
+
+    vol_cap_effect = m_vc["sharpe"] - m_eq["sharpe"]
+    alpha_tilt_effect = m_mw["sharpe"] - m_vc["sharpe"]
+
+    lines = [
+        f"Static equal-weight Sharpe:            {m_eq['sharpe']:.3f}",
+        f"+ vol-cap effect:                      {vol_cap_effect:+.3f}  -> vol-controlled equal-weight Sharpe: {m_vc['sharpe']:.3f}",
+        f"+ alpha-tilt effect (the optimizer):   {alpha_tilt_effect:+.3f}  -> Markowitz Sharpe: {m_mw['sharpe']:.3f}",
+    ]
+    if vol_cap_effect < 0:
+        lines.append(
+            "-> Vol-capping ALONE hurt Sharpe here: it trades return for a smoother ride, "
+            "and a lower-volatility strategy does not automatically have a higher Sharpe."
+        )
+    if alpha_tilt_effect > 0:
+        lines.append(
+            "-> The alpha tilt ADDED Sharpe on top of the vol-cap baseline -- check "
+            "signal_diagnostics() to see whether that recovery is attributable to real "
+            "predictive skill (positive Information Coefficient) or to the tilt happening "
+            "to reduce concentration/drawdown risk rather than to picking winners."
+        )
+    else:
+        lines.append(
+            "-> The alpha tilt did NOT add Sharpe on top of the vol-cap baseline -- check "
+            "signal_diagnostics() for the Information Coefficient; a near-zero or negative "
+            "IC would directly explain this."
+        )
+
+    return {
+        "equal_weight_sharpe": m_eq["sharpe"],
+        "vol_controlled_sharpe": m_vc["sharpe"],
+        "markowitz_sharpe": m_mw["sharpe"],
+        "vol_cap_effect": vol_cap_effect,
+        "alpha_tilt_effect": alpha_tilt_effect,
+        "narrative": "\n".join(lines),
+    }
+
+
 def cost_sensitivity(
     simulate_fn,
     cost_bps_grid: list[float] = (5.0, 15.0, 30.0, 50.0),

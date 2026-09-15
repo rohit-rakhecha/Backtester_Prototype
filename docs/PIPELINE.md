@@ -30,6 +30,20 @@ in seconds instead of re-reading the paper.
 - Ambiguous or missing details (e.g. "conservative estimate of trading costs" without a
   number until §2.5) are surfaced as open questions for Gate A, not silently guessed.
 
+**Comprehensive, not just field-by-field.** `comprehensive_ingest()` mines three things
+from every paper, not just whatever a specific Card field happens to search for:
+(1) the Abstract, verbatim — the authors' own one-paragraph economic thesis; (2) every
+sentence anywhere in the paper containing economic-reasoning language ("we find",
+"because", "consistent with", "driven by", ...), page-anchored, regardless of which
+section it's in; (3) regex-mined candidate parameters (lookback window, rebalance
+frequency, cost bps, volatility target) AND which broad asset classes/segments the
+paper's own vocabulary touches on (equity, bond, gold/commodity, mutual fund, cash rate,
+factor style, derivatives) — this last one is what drives Stage 03's interactive data
+discovery below, so a bond-heavy paper actually gets asked about bond data, not just
+whatever the Card author remembered to type. This is the concrete meaning of "Stage 01
+dictates the flow of the entire pipeline": `ingest/strategy_card.py:build_card_interactively`
+is driven entirely off this report, never off a blank form.
+
 ---
 
 ## 02 — Strategy Card  (`backtester/ingest/strategy_card.py`)
@@ -56,6 +70,15 @@ review* problem instead of a *needle in a haystack* problem.
   eq. (1) for the vol-control dilution rule, eq. (3) for the optimization problem, Table 7
   for the 42-feature forecast).
 - Ambiguities are resolved explicitly at Gate A, not silently defaulted.
+
+**Interactive builder.** `build_card_interactively()` turns this from "researcher fills in
+a blank YAML" into "researcher confirms or overrides a default the ingest report already
+found, one field at a time" — every prompt shows what Stage 01 mined (with its page
+number) before asking. It also auto-generates an `Ambiguity` for every candidate
+parameter Stage 01 could *not* find anywhere in the paper (so a gap is a structured,
+trackable item, not a silent zero) plus a standing `asset_class_coverage` ambiguity
+listing every asset class/segment the paper's text touched on, which Gate A and Stage 03
+both consume.
 
 ---
 
@@ -99,6 +122,18 @@ for macro series.
 **Green flags:** Every proxy sign-off states *why* it's an acceptable substitute and *how*
 it might change the result (see `docs/DATA_SOURCES.md` for every proxy used in the worked
 example, each with this reasoning spelled out).
+
+**Interactive, any-asset-class discovery.** `discover_datasets_interactively()` is
+deliberately not equity-only: it walks through every asset class Stage 01 found the paper
+talking about (falling back to a fixed checklist — equity, bond, gold/commodity, mutual
+fund, cash rate, derivatives — so nothing is skipped just because the paper used unusual
+wording), and for each one asks whether to (a) use a column from a file already in
+`data/raw/`, (b) upload a new file (any asset class — a bond index, a mutual fund NAV
+series, an RBI rate series, ...), tagged so later stages know what they're holding, or
+(c) explicitly decline with a reason. This is what lets the pipeline handle a future paper
+whose signal needs bonds or mutual funds, not just the equity factor sleeves in the
+attached worked example, without changing a line of engine code — only the Stage 03
+conversation changes.
 
 ---
 
@@ -183,6 +218,34 @@ count is the *actual* number of specifications explored, including ones that wer
 performance is broken out by sub-period/regime so a lucky decade isn't mistaken for skill
 (our engine reports both 5-year subperiods and ex-2008-style crisis-exclusion splits, mirroring
 Table 2 and the paragraph beneath it in the source paper).
+
+**Signal transparency — mechanism, not just outcome.** A Sharpe ratio alone can't tell you
+*why* a strategy did or didn't beat a naive baseline. Two functions close that gap, and
+both tie explicitly back to Stage 02's `signal.description` claim:
+- `signal_diagnostics()` computes the realized **Information Coefficient** — the
+  cross-sectional rank correlation between the alpha the optimizer actually used at each
+  rebalance (logged via `engine/signals.py:markowitz(..., diagnostics=log)`) and each
+  asset's realized forward return. An IC near zero is direct, quantitative evidence that
+  the signal wasn't predictive in this sample — not a restatement of what the source paper
+  claimed for a different market/period.
+- `decompose_vs_equal_weight()` splits the optimizer's Sharpe difference from static
+  equal-weight into a **vol-cap effect** and an **alpha-tilt effect**, because a Markowitz-
+  style strategy does two different things (cap risk, and tilt toward a forecast) and a
+  single Sharpe number conflates them. On the attached worked example this decomposition
+  showed the vol-cap effect was *negative* (−0.095 Sharpe) and the alpha-tilt effect
+  *positive* (+0.094), roughly cancelling — which the Information Coefficient (≈0.02,
+  essentially noise) directly explains: the optimizer's tilt wasn't picking real winners,
+  it just happened to claw back what the vol cap gave up.
+
+**Red flags (signal transparency):** Reporting only that "the optimizer beat/matched
+equal-weight" without checking IC or running the decomposition; treating a near-zero IC as
+proof the *paper's* signal claim is wrong in general, rather than as evidence about this
+specific dataset/period.
+
+**Green flags:** Every Markowitz-family result in the library carries its IC and
+decomposition alongside the Sharpe ratio; a reviewer can distinguish "this signal has real
+predictive power here" from "this strategy happens to have a good Sharpe for reasons
+unrelated to the signal" (e.g. incidental risk reduction).
 
 ---
 

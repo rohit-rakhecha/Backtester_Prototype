@@ -155,6 +155,10 @@ one_way_bps = DEFAULT_INDIA_COST_MODEL.one_way_cost_bps()
 print(f"India one-way cost assumption: {one_way_bps:.2f} bps "
       f"(vs. paper's flat {card.cost.paper_assumed_bps} bps half-spread)")
 
+# `markowitz_diagnostics` is populated as the strategy runs (one entry per rebalance:
+# the alpha vector actually used + the resulting weights) -- see engine/signals.py and
+# Stage 06 below, where it's used to directly test whether that alpha predicted anything.
+markowitz_diagnostics: list[dict] = []
 strategies = {
     "Equal-weight benchmark (fixed)": sig.fixed_weight_benchmark(equal_weight),
     f"Vol-controlled ({target_vol:.0%} target)": sig.vol_controlled(equal_weight, target_vol, lookback_days=11),
@@ -162,6 +166,7 @@ strategies = {
         equal_weight, target_vol, l1_trust_region=card.risk.max_relative_weight_deviation_l1,
         cov_lookback_days=11, alpha_halflife_days=252, horizon_days=21,
         one_way_cost_bps=one_way_bps, cash_annual_rate=0.0,
+        asset_names=ASSET_COLS, diagnostics=markowitz_diagnostics,
     ),
 }
 
@@ -244,6 +249,22 @@ cost_grid = research_validation.cost_sensitivity(
 )
 print("\nCost sensitivity (one-way bps -> Sharpe):")
 print(cost_grid[["one_way_cost_bps", "sharpe"]].to_string(index=False))
+
+hr("STAGE 06b -- Signal transparency: is the Markowitz alpha actually predictive?")
+print(f"Strategy Card's signal claim (Stage 02): \"{card.signal.description}\"")
+sig_diag = research_validation.signal_diagnostics(
+    markowitz_diagnostics, returns, horizon_days=21, card_signal_description=card.signal.description,
+)
+print(f"\nInformation Coefficient (rank correlation of alpha vs. realized forward return):")
+print(f"  mean IC: {sig_diag['mean_ic']:.4f}   hit rate: {sig_diag['hit_rate']:.1%}   "
+      f"rebalances evaluated: {sig_diag['n_rebalances_evaluated']}")
+print(f"  {sig_diag['interpretation']}")
+
+print("\nDecomposition of Markowitz vs. equal-weight Sharpe (same equal-weight target mix in all three legs):")
+decomp = research_validation.decompose_vs_equal_weight(
+    results["Equal-weight benchmark (fixed)"], results[f"Vol-controlled ({target_vol:.0%} target)"], markowitz_result,
+)
+print(decomp["narrative"])
 
 # ---------------------------------------------------------------------------
 # STAGE 07 -- Portfolio validation
