@@ -1,0 +1,117 @@
+card_id: card_dyn_factor_rotation_india_v1
+title: "Dynamic NIFTY Factor-Sleeve Rotation (India, long-only)"
+source_title: "Simple Dynamic Stock/Bond/Gold Portfolios"
+source_authors: ["Nikhil Devanathan", "Alexandros E. Tzikas", "Stephen P. Boyd"]
+source_url: "arXiv:2609.07946v1 [q-fin.PM]"
+ingested_at: "2026-09-15T00:00:00Z"
+
+universe: >
+  Seven NSE long-only, investable factor-sleeve indices (NIFTY Alpha 50, NIFTY500
+  Momentum 50, NIFTY500 Multifactor MQVLV 50, NIFTY500 Quality 50, NIFTY500 Value 50,
+  NIFTY500 Low Volatility 50, NIFTY High Beta 50), implemented via index funds/ETFs,
+  plus cash. India adaptation of the paper's 3-asset (SPY/AGG/GLD) universe -- bond and
+  gold sleeves are UNAVAILABLE in the attached data bundle (see docs/DATA_SOURCES.md) and
+  are explicitly out of scope for this Card version, not silently dropped.
+universe_evidence:
+  page: 2
+  quote: "We restrict ourselves to long-only dynamic portfolios of stocks, bonds, and gold, plus cash, rebalancing monthly, using only publicly available data."
+  confidence: high
+
+benchmark: "NIFTY 500 (equal-weight-across-sleeves fixed benchmark, and NIFTY 500 index itself as a second reference)"
+
+signal:
+  name: "vol_capped_momentum_markowitz_india"
+  description: >
+    Monthly convex optimization over the seven factor sleeves: maximize a simple
+    causal trailing-momentum return forecast net of estimated India trading cost,
+    subject to long-only, fully-invested-or-less, a hard annualized volatility cap,
+    and an L1 trust region around an equal-weight target mix across sleeves. Direct
+    generalization of the paper's eq. (3) from 3 assets to 7 factor sleeves.
+  lookback_days: 11
+  lag_days: 0
+  rebalance_frequency: monthly
+  weighting_rule: "convex optimization, eq. (3) generalized to N=7 assets -- see backtester/engine/signals.py:markowitz"
+  evidence:
+    - page: 7
+      quote: "maximize alpha_t^T w + r_t^mrf(1-1^Tw) - (s/2)||w-w_t||_1 subject to w>=0, sum(w)<=1, ||w-(1^Tw)w^tgt||_1<=1^Tw, (w^T Sigma_t w)^(1/2) <= sigma^tgt"
+      confidence: high
+    - page: 8
+      quote: "For the simple Markowitz portfolio, we take alpha_t to be the exponentially weighted moving average of each asset's past daily returns, with a half-life of 252 trading days"
+      confidence: high
+
+risk:
+  target_volatility_annual: 0.12
+  max_relative_weight_deviation_l1: 1.0
+  long_only: true
+  leverage_allowed: false
+  derivatives_allowed: false
+
+cost:
+  paper_assumed_bps: 5.0
+  paper_evidence:
+    page: 9
+    quote: "includes a trading cost of 5 basis points (a 2.5 basis point half-spread) on asset trading"
+    confidence: high
+  india_cost_model: "backtester.engine.costs.DEFAULT_INDIA_COST_MODEL"
+
+data_requirements:
+  - name: equity_factor_sleeves_daily_close
+    description: "Daily close, NIFTY Alpha 50 / Momentum 50 / Multifactor MQVLV 50 / Quality 50 / Value 50 / Low Volatility 50 / High Beta 50"
+    frequency: daily
+    required_history_years: 20
+    evidence:
+      page: 9
+      quote: "Daily adjusted close prices for SPY, AGG, and GLD were obtained from Yahoo Finance"
+      confidence: medium
+  - name: benchmark_daily_close
+    description: "NIFTY 500 daily close"
+    frequency: daily
+    required_history_years: 20
+  - name: cash_risk_free_rate
+    description: "India risk-free/cash-equivalent daily accrual rate (RBI T-Bill or MIBOR)"
+    frequency: daily
+    required_history_years: 20
+    evidence:
+      page: 9
+      quote: "the federal funds rate (FRED series DFF) ... are downloaded from FRED"
+      confidence: high
+
+ambiguities:
+  - field: cost.paper_assumed_bps
+    description: >
+      Paper states "a conservative estimate of trading costs" in the abstract without a
+      number; the actual 5bp figure only appears in §2.5. Resolved by direct page citation
+      above (page 9).
+    resolution: "Resolved -- 5bp confirmed at page 9, but NOT reused directly for India (see india_adaptation_notes); Indian cost model built separately in engine/costs.py."
+    resolved_by: "ingest stage (page lookup), confirmed at Gate A"
+  - field: data_requirements.cash_risk_free_rate
+    description: >
+      No India cash-rate series is attached in the current data bundle. The optimizer's
+      cash leg and the volatility-control dilution both require it (paper eq. 1, eq. 3).
+    resolution: null
+  - field: universe
+    description: >
+      Paper's universe is 3 broad asset classes (stock/bond/gold); this Card substitutes
+      7 equity factor SLEEVES for the paper's single equity sleeve, and DROPS bond/gold
+      entirely rather than proxying them, due to data unavailability. This is a materially
+      different (equity-concentration) risk profile from the paper's cross-asset diversification.
+    resolution: null
+
+india_adaptation_notes: >
+  (1) Universe: paper's SPY/AGG/GLD replaced by 7 NIFTY long-only factor-sleeve indices;
+  bond/gold legs dropped (UNAVAILABLE, not proxied -- see docs/DATA_SOURCES.md). This is a
+  scope reduction the paper's own cross-asset diversification logic (§1.1) does not
+  directly support -- Gate A must weigh whether an equity-only factor rotation is still a
+  sound economic idea on its own, not just "the closest available substitute." (2) Cost
+  model: paper's flat 5bp replaced by an explicit India statutory + impact cost model
+  (STT, stamp duty, exchange charges, GST, wider impact cost for less-liquid smart-beta
+  products) -- see engine/costs.py. (3) Cash rate: UNAVAILABLE, currently hardcoded to 0%
+  in the worked example and flagged as an open Gate A item, not silently assumed.
+  (4) Target volatility lowered implicitly is NOT done -- 12% is used (vs. paper's 7%)
+  because an all-equity sleeve universe has structurally higher minimum achievable
+  volatility than a stock/bond/gold universe; forcing 7% would mean holding mostly cash,
+  which is a valid strategy but a different one than what this Card is testing.
+
+gate_a_status: pending
+gate_a_reviewer: null
+gate_a_note: null
