@@ -47,11 +47,20 @@ equivalents, are in [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md).
 drive it, with only a couple of short confirmations otherwise — not a long interview:
 
 1. **Upload any research paper (PDF).** Stage 01 parses it comprehensively (abstract,
-   every economic-reasoning sentence, candidate parameters), and Stage 02 **auto-
-   interprets** a Strategy Card directly from that parsing — no field-by-field questions.
+   every economic-reasoning sentence, candidate parameters). Stage 02 then turns that into
+   a Strategy Card — no field-by-field questions either way — via one of two paths:
+   - **LLM extraction** (`backtester/ingest/llm_extract.py`, recommended): a real Claude
+     call reads the full paper and fills the Card via structured output. Every citation it
+     returns is verified in code against the actual page text afterward (`verify_quote`) —
+     a hallucinated quote is caught and flagged for Gate A, not trusted. Needs an
+     `ANTHROPIC_API_KEY` (you'll be prompted for one, input hidden, if it isn't already
+     set); costs well under $1 and takes 30–90 seconds for a typical paper.
+   - **Regex auto-interpretation** (`build_card_automatically`): the no-key fallback,
+     pattern-matching rather than comprehending.
+
    Swap in a different paper each run and a different Card comes out automatically,
    because every default traces back to what *that* paper's text actually said. You
-   approve or reject the whole auto-interpreted Card in one Gate A decision.
+   approve or reject the whole interpreted Card in one Gate A decision.
 2. **Upload your NIFTY-indices dataset (CSV)** — the same shape as the attached
    `nifty_factor_indices.csv` (or leave it blank to use the bundled one). This run's scope
    is fixed to **India public equities**, via whichever columns are in that file — no

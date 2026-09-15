@@ -71,19 +71,42 @@ review* problem instead of a *needle in a haystack* problem.
   for the 42-feature forecast).
 - Ambiguities are resolved explicitly at Gate A, not silently defaulted.
 
-**Two builders, same underlying report.** Both are driven entirely off Stage 01's
-`IngestReport` — the difference is how much a human is asked, not what the AI is allowed
-to author (the constraint is still the schema, either way):
-- `build_card_automatically()` — the default in `examples/run_pipeline_interactive.py`.
-  No per-field questions: every numeric field either uses the best candidate Stage 01
-  actually found in the paper (page-cited) or a fixed, documented default, and every such
-  choice is logged as an auto-resolved `Ambiguity` (what was found vs. what was defaulted
-  and why) rather than asked interactively. Gate A then reviews and approves/rejects the
-  *whole* auto-interpreted Card as one decision, with the full reasoning already visible,
-  instead of authoring it field by field.
-- `build_card_interactively()` — the same idea, but stops and asks at each field instead
-  of auto-selecting a default; useful when a Card needs closer human authorship than the
-  default automatic pass gives it. Still available, just not the default entry point.
+**Three builders, same underlying report.** All three are driven entirely off Stage 01's
+`IngestReport` — the difference is how the interpretation is done and how much a human is
+asked, not what the AI is allowed to author (the constraint is still the schema, either
+way):
+- `build_card_via_llm()` (`backtester/ingest/llm_extract.py`) — the recommended path in
+  `examples/run_pipeline_interactive.py` when an API key is available. A real Claude call
+  reads the full paper (page-marked, so it can cite precisely) and fills the same typed
+  Card via `client.messages.parse(..., output_format=LLMCardExtraction)` — structured
+  output, so it cannot return anything outside the schema. This is genuine reading
+  comprehension rather than pattern matching: it can tell a paper's actual thesis apart
+  from a caveat it's arguing against, which the regex version cannot (see the worked
+  example in this repo's history, where the regex path picked *"fixed-weight portfolios
+  can be difficult to beat... because forecasting is challenging"* — the authors' hedge,
+  not their claim — as the "signal description"). Critically, **the model's citations are
+  not trusted** — every `Evidence.quote` it returns is checked in code
+  (`llm_extract.verify_quote`) against the actual text of the page it claims, using the
+  same `=== PAGE N ===` markers fed to the model as ground truth. A verified quote gets
+  `confidence: high`; a real quote on the wrong page gets auto-corrected with a logged,
+  pre-resolved `Ambiguity`; a quote that cannot be found anywhere in the paper (a
+  hallucination) gets `confidence: low` and an **unresolved** `Ambiguity` that blocks Gate
+  A approval until a human checks it. This is the concrete implementation of "AI
+  interprets, deterministic infrastructure verifies" for Stage 02 specifically — the
+  verification step is plain string matching, not another model call, so it cannot itself
+  hallucinate.
+- `build_card_automatically()` — the no-API-key fallback. Same schema, same
+  page-anchored-default-or-documented-fallback pattern, but via the regex/keyword mining
+  in `parser.py` instead of a model call — faster, free, and available offline, at the
+  cost of the comprehension a real model brings (it cannot distinguish a thesis from a
+  caveat, only find keyword matches).
+- `build_card_interactively()` — stops and asks at each field instead of auto-selecting;
+  useful when a Card needs closer human authorship than either automatic pass gives it.
+  Still available, just not the default entry point.
+
+In every case, Gate A reviews and approves/rejects the *whole* interpreted Card as one
+decision (plus resolving any items the builder itself left open), with the full reasoning
+already visible, instead of authoring it field by field.
 
 ---
 

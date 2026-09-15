@@ -90,6 +90,33 @@ def prompt_multiselect(message: str, options: list[str]) -> list[str]:
     return picks
 
 
+def ensure_anthropic_api_key() -> bool:
+    """Makes sure `ANTHROPIC_API_KEY` is set for this process, prompting for one (hidden
+    input, via `getpass`) if it isn't already in the environment. Returns True if a key
+    is available by the end of the call, False if the user declined -- callers should
+    treat False as "fall back to the non-LLM extraction path", not as an error.
+
+    Never logs or echoes the key. Setting it via `os.environ` here makes it visible to
+    the `anthropic` SDK's default credential resolution for the rest of this process
+    (Colab kernel session or local run) without having to thread it through every call.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True
+
+    print("LLM-based extraction needs an Anthropic API key (ANTHROPIC_API_KEY is not set "
+          "in this environment).")
+    if not prompt_yesno("Paste one now? (input is hidden; get a key at console.anthropic.com)", default=True):
+        return False
+
+    import getpass
+    key = getpass.getpass("ANTHROPIC_API_KEY: ").strip()
+    if not key:
+        print("  No key entered.")
+        return False
+    os.environ["ANTHROPIC_API_KEY"] = key
+    return True
+
+
 def upload_file(prompt_message: str, save_dir: str) -> str:
     """Returns a local filesystem path to an uploaded (Colab) or manually-specified
     (local Jupyter/terminal) file. Empty string means the user declined."""

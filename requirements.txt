@@ -5,3 +5,4 @@ cvxpy>=1.4
 pydantic>=2.0
 pyyaml>=6.0
 openpyxl>=3.1
+anthropic>=1.5

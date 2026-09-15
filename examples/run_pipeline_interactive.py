@@ -3,9 +3,13 @@
 Two manual uploads drive this run, nothing else:
   1. The research paper (PDF) -- Stage 01 parses it comprehensively (abstract, every
      economic-reasoning sentence, candidate parameters, asset classes discussed), and
-     Stage 02 auto-interprets a Strategy Card directly from that parsing -- no field-by-
-     field interview. Swap in a different paper and a different Card comes out, because
-     every default traces back to what THAT paper's text actually said.
+     Stage 02 turns that into a Strategy Card, either via a real Claude reading-
+     comprehension call (backtester/ingest/llm_extract.py -- every citation it returns is
+     mechanically verified against the actual page text afterward, so a hallucinated quote
+     is caught in code, not trusted) or, if you skip the API key prompt, the regex-based
+     auto-interpreter (build_card_automatically) as a no-key fallback. Either way: no
+     field-by-field interview. Swap in a different paper and a different Card comes out,
+     because every default traces back to what THAT paper's text actually said.
   2. The NIFTY-indices dataset (CSV **or** the raw Excel file, e.g. the attached
      `Factor_Indices_Historical_Price_Data.xlsx` / `nifty_factor_indices.csv`, or your own
      file in the same shape) -- used AS-IS as the tradable universe for a simple, long-only
@@ -39,7 +43,9 @@ import pandas as pd
 
 from backtester.ingest.parser import comprehensive_ingest, print_ingest_report
 from backtester.ingest.strategy_card import build_card_automatically, save_card
-from backtester.ingest.interactive_io import upload_file, prompt_text, prompt_choice, in_colab
+from backtester.ingest.interactive_io import (
+    upload_file, prompt_text, prompt_choice, prompt_yesno, in_colab, ensure_anthropic_api_key,
+)
 from backtester.data.pit_loader import PointInTimeDataset
 from backtester.data.sources import DataFeasibilityRegistry, DataSourceEntry, Feasibility
 from backtester.gates.audit import AuditLog, GateBDecision
@@ -77,17 +83,45 @@ report = comprehensive_ingest(paper_path)
 print_ingest_report(report)
 
 # ---------------------------------------------------------------------------
-# STAGE 02 -- Strategy Card, AUTO-INTERPRETED from Stage 01's report. No questions here --
-# every field below traces to something Stage 01 found (or a documented default), logged
-# as an auto-resolved ambiguity rather than asked interactively.
+# STAGE 02 -- Strategy Card. Two ways to build it, your choice:
+#   (a) LLM reading comprehension (backtester/ingest/llm_extract.py) -- a real Claude call
+#       reads the full paper and fills the Card, with every citation VERIFIED in code
+#       against the actual page text afterward (a fabricated quote is caught, not trusted).
+#   (b) The regex-based auto-interpreter (build_card_automatically) -- no API key needed,
+#       pattern-matches rather than comprehends, kept as the always-available fallback.
 # ---------------------------------------------------------------------------
-hr("STAGE 02 -- Strategy Card (auto-interpreted from the Stage 01 ingest report above)")
-card = build_card_automatically(report)
-print(f"\nUniverse (fixed scope for this run): {card.universe}")
-print(f"Signal (auto-interpreted): {card.signal.description[:200]}")
-print("\nAuto-resolved fields (what was found in the paper vs. what was defaulted):")
+hr("STAGE 02 -- Strategy Card")
+use_llm = False
+if prompt_yesno(
+    "Use LLM-based extraction for Stage 02? (real reading comprehension via the Claude API, "
+    "with citations verified against the source pages afterward; needs an API key)",
+    default=True,
+):
+    if ensure_anthropic_api_key():
+        use_llm = True
+    else:
+        print("No API key provided -- falling back to the regex-based auto-interpreter.")
+
+if use_llm:
+    from backtester.ingest.llm_extract import build_card_via_llm
+    try:
+        print("\nCalling Claude to read the paper and fill the Strategy Card "
+              "(this can take 30-90 seconds for a long paper)...")
+        card = build_card_via_llm(report)
+    except Exception as e:
+        print(f"\nLLM extraction failed ({type(e).__name__}: {e}) -- "
+              f"falling back to the regex-based auto-interpreter.")
+        card = build_card_automatically(report)
+else:
+    card = build_card_automatically(report)
+
+print(f"\nUniverse: {card.universe}")
+print(f"Signal: {card.signal.description[:300]}")
+print(f"\n{len(card.ambiguities)} ambiguities recorded "
+      f"({len(card.unresolved_ambiguities())} still unresolved):")
 for a in card.ambiguities:
-    print(f"  [{a.field}] {a.resolution}")
+    status = a.resolution if a.resolution else "** UNRESOLVED -- needs a human decision before Gate A **"
+    print(f"  [{a.field}] {status}")
 
 card_yaml_path = os.path.join(REPO_ROOT, "data", "lineage", f"{card.card_id}.yaml")
 os.makedirs(os.path.dirname(card_yaml_path), exist_ok=True)
@@ -95,14 +129,22 @@ save_card(card, card_yaml_path)
 print(f"\nCard saved to {card_yaml_path}")
 
 # ---------------------------------------------------------------------------
-# GATE A -- one human decision on the whole auto-interpreted Card, not a per-field
-# interview (the fields were already auto-resolved above, with reasoning attached).
+# GATE A -- resolve anything still open (typically only an unverified LLM citation ends
+# up here; the regex path pre-resolves everything), then one human decision on the Card.
 # ---------------------------------------------------------------------------
 hr("GATE A -- Human interpretation sign-off")
+if card.unresolved_ambiguities():
+    print(f"{len(card.unresolved_ambiguities())} item(s) need a human decision before this "
+          f"Card can be approved:\n")
+    for a in card.unresolved_ambiguities():
+        print(f"[{a.field}] {a.description}")
+        a.resolution = prompt_text("  Resolution (how is this being handled?)")
+        a.resolved_by = prompt_text("  Resolved by (your name/role)", default="reviewer")
+
 reviewer = prompt_text("Gate A reviewer name", default="reviewer")
-decision = prompt_choice("Gate A decision -- approve this auto-interpreted Card?", ["approved", "rejected"])
+decision = prompt_choice("Gate A decision -- approve this Card?", ["approved", "rejected"])
 note = prompt_text(
-    "Gate A note (required -- e.g. confirm the auto-interpretation looks right, or say what's off)"
+    "Gate A note (required -- e.g. confirm the interpretation looks right, or say what's off)"
 )
 audit = AuditLog(path=os.path.join(REPO_ROOT, "data", "lineage", "audit_log.jsonl"))
 gate_a_entry = audit.gate_a(card, reviewer=reviewer, decision=decision, note=note)
