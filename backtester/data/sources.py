@@ -164,17 +164,24 @@ class UniverseComponent:
 
 
 def list_local_csv_datasets(data_dir: str = "data/raw") -> dict[str, list[str]]:
-    """Every CSV already on disk and its non-date columns -- what Stage 03 can offer the
-    user to pick from before asking them to upload anything new."""
-    import pandas as pd
+    """Every CSV or Excel file already on disk and its non-date columns -- what Stage 03
+    can offer the user to pick from before asking them to upload anything new. Name kept
+    as `_csv_` for backward compatibility with existing callers; it covers .xlsx/.xls too
+    (see `backtester/data/pit_loader.py:_read_tabular_file`, used here for both formats)."""
+    from .pit_loader import _read_tabular_file
 
     out: dict[str, list[str]] = {}
-    for path in sorted(glob.glob(os.path.join(data_dir, "*.csv"))):
+    paths = sorted(
+        glob.glob(os.path.join(data_dir, "*.csv"))
+        + glob.glob(os.path.join(data_dir, "*.xlsx"))
+        + glob.glob(os.path.join(data_dir, "*.xls"))
+    )
+    for path in paths:
         try:
-            cols = list(pd.read_csv(path, nrows=0).columns)
+            cols = list(_read_tabular_file(path).columns)
         except Exception:
             cols = []
-        out[path] = [c for c in cols if c.strip().lower() != "date"]
+        out[path] = [c for c in cols if str(c).strip().lower() != "date"]
     return out
 
 
@@ -239,13 +246,15 @@ def discover_datasets_interactively(
             ))
 
         while prompt_yesno(f"Upload an additional file for '{cls}'?", default=False):
-            path = upload_file(f"Upload a CSV for '{cls}' (must have a 'date' column)", save_dir=data_dir)
+            path = upload_file(
+                f"Upload a .csv or .xlsx file for '{cls}' (must have a 'date' column)", save_dir=data_dir
+            )
             if not path or not os.path.exists(path):
                 print("  No file received -- skipping upload.")
                 break
             try:
-                import pandas as pd
-                cols = [c for c in pd.read_csv(path, nrows=0).columns if c.strip().lower() != "date"]
+                from .pit_loader import _read_tabular_file
+                cols = [c for c in _read_tabular_file(path).columns if str(c).strip().lower() != "date"]
             except Exception as e:
                 print(f"  Could not read {path}: {e}")
                 cols = []

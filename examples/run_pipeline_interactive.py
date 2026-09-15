@@ -6,11 +6,14 @@ Two manual uploads drive this run, nothing else:
      Stage 02 auto-interprets a Strategy Card directly from that parsing -- no field-by-
      field interview. Swap in a different paper and a different Card comes out, because
      every default traces back to what THAT paper's text actually said.
-  2. The NIFTY-indices dataset (CSV, e.g. the attached `nifty_factor_indices.csv`, or your
-     own file in the same shape) -- used AS-IS as the tradable universe for a simple,
-     long-only India public-equities backtest. No per-asset-class questionnaire: this
-     pipeline's scope for this run is fixed to Indian public equities via whatever columns
-     are in the file you upload.
+  2. The NIFTY-indices dataset (CSV **or** the raw Excel file, e.g. the attached
+     `Factor_Indices_Historical_Price_Data.xlsx` / `nifty_factor_indices.csv`, or your own
+     file in the same shape) -- used AS-IS as the tradable universe for a simple, long-only
+     India public-equities backtest. No per-asset-class questionnaire: this pipeline's
+     scope for this run is fixed to Indian public equities via whatever columns are in the
+     file you upload. Both formats are read through the same point-in-time loader
+     (`backtester/data/pit_loader.py:PointInTimeDataset.from_file`), so you don't need to
+     pre-convert an Excel file to CSV yourself.
 
 Unlike `examples/run_pipeline.py` (a fixed, non-interactive worked example pinned to the
 attached factor-rotation Card and the attached CSV -- kept as a known-good regression
@@ -114,16 +117,18 @@ if decision != "approved":
 # ---------------------------------------------------------------------------
 hr("STAGE 03 -- Data feasibility (India public equities, single uploaded dataset)")
 print("This run's scope is fixed to India public equities via one NIFTY-indices dataset --")
-print("no per-asset-class questions. Upload your own CSV, or accept the bundled example.\n")
+print("no per-asset-class questions. Upload your own CSV or Excel file, or accept the bundled example.\n")
 dataset_path = upload_file(
-    "Upload your NIFTY-indices CSV (leave blank / cancel to use the bundled data/raw/nifty_factor_indices.csv)",
+    "Upload your NIFTY-indices dataset (.csv or .xlsx -- leave blank / cancel to use the "
+    "bundled data/raw/nifty_factor_indices.csv)",
     save_dir=os.path.join(REPO_ROOT, "data", "raw"),
 )
 if not dataset_path:
     dataset_path = DEFAULT_DATASET_PATH
     print(f"No file uploaded -- using the bundled dataset: {dataset_path}")
 if not os.path.exists(dataset_path):
-    raise SystemExit(f"Dataset not found at {dataset_path} -- upload a CSV and re-run.")
+    raise SystemExit(f"Dataset not found at {dataset_path} -- upload a .csv or .xlsx file and re-run.")
+print(f"Using dataset: {dataset_path}")
 
 registry = DataFeasibilityRegistry()
 registry.register(DataSourceEntry(
@@ -138,7 +143,7 @@ print(registry.report())
 # broad-market benchmark column, and trim to the common evaluation window.
 # ---------------------------------------------------------------------------
 hr("STAGE 04 -- Point-in-time data")
-dataset = PointInTimeDataset.from_csv(dataset_path)
+dataset = PointInTimeDataset.from_file(dataset_path)
 print(f"Source: {dataset.lineage.source_path}")
 print(f"Content SHA-256: {dataset.lineage.content_sha256}")
 print(f"Rows: {dataset.lineage.n_rows}  Range: {dataset.lineage.first_date} .. {dataset.lineage.last_date}")
